@@ -4,6 +4,7 @@ import random
 import hashlib
 import ecdsa
 import base58
+import multiprocessing
 
 # Puzzle #69 keyspace
 START_HEX = "10000000000000000000000000"
@@ -18,8 +19,10 @@ TARGET_PREFIX = "19vk"
 TARGET_ADDRESS = "19vkiEajfhuZ8bs8Zu2jgmC6oqZbWqhxhG"
 CHUNK_PERCENT = 0.1
 CHUNK_SIZE = int(KEYSPACE_SIZE * (CHUNK_PERCENT / 100))
-ATTEMPTS_PER_RUN = 100000
 REQUIRED_MATCHES_PER_CHUNK = 5
+
+# Number of CPU Cores
+CPU_CORES = multiprocessing.cpu_count()
 
 def save_progress(chunk_index):
     with open(PROGRESS_FILE, "w") as f:
@@ -29,8 +32,8 @@ def load_progress():
     if os.path.exists(PROGRESS_FILE):
         with open(PROGRESS_FILE, "r") as f:
             data = json.load(f)
-            return data.get("chunk_index", 1)  # Start from 30.1% => index 301
-    return 301
+            return data.get("chunk_index", 1)
+    return 301  # Start from 30.1%
 
 def private_key_to_address(private_key_hex):
     private_key_bytes = bytes.fromhex(private_key_hex)
@@ -44,8 +47,9 @@ def private_key_to_address(private_key_hex):
     address = base58.b58encode(network_byte + checksum)
     return address.decode()
 
-def scan_chunk(start, end):
-    rng = random.Random(start)
+def worker_task(args):
+    start, end, seed = args
+    rng = random.Random(seed)
     match_count = 0
     attempts = 0
 
@@ -55,20 +59,31 @@ def scan_chunk(start, end):
         address = private_key_to_address(private_key_hex)
         attempts += 1
 
+        if address == TARGET_ADDRESS:
+            print(f"🎯🎯 FOUND TARGET: {address} — Private Key: {private_key_hex}")
+            os._exit(0)  # Immediately stop all processes!
+
         if address.startswith(TARGET_PREFIX):
             match_count += 1
             print(f"[MATCH] {address} — Private Key: {private_key_hex}")
 
-        if address == TARGET_ADDRESS:
-            print(f"🎯 FOUND TARGET: {address} — Private Key: {private_key_hex}")
-            return True
+            if match_count >= REQUIRED_MATCHES_PER_CHUNK:
+                return match_count
 
-        if match_count >= REQUIRED_MATCHES_PER_CHUNK:
-            print(f"✅ Found {match_count} matches. Moving to next chunk.")
-            return False
+        if attempts % 100000 == 0:
+            print(f"⏳ Worker Progress: {attempts} attempts — Matches: {match_count}")
 
-        if attempts % ATTEMPTS_PER_RUN == 0:
-            print(f"⏳ Attempts: {attempts} — Matches: {match_count}")
+def scan_chunk(start, end):
+    seeds = [random.randint(1, 1 << 30) for _ in range(CPU_CORES)]
+    args_list = [(start, end, seed) for seed in seeds]
+
+    with multiprocessing.Pool(CPU_CORES) as pool:
+        results = pool.map(worker_task, args_list)
+
+    total_matches = sum(results)
+    print(f"✅ Total matches in chunk: {total_matches}")
+
+    return total_matches >= REQUIRED_MATCHES_PER_CHUNK
 
 def main():
     chunk_index = load_progress()
@@ -82,13 +97,14 @@ def main():
 
         print(f"\n🔁 Scanning chunk {percent_start:.4f}%–{percent_end:.4f}% of Puzzle #69")
         print(f"📦 Range: 0x{start:x} – 0x{end:x}")
+        print(f"🧠 Using {CPU_CORES} CPU cores...")
 
         found = scan_chunk(start, end)
         if found:
-            break
-
-        chunk_index += 1
-        save_progress(chunk_index)
+            chunk_index += 1
+            save_progress(chunk_index)
+        else:
+            print("⚠️ Chunk completed but not enough matches?")
 
         if start >= END_INT:
             print("✅ Finished scanning 100% of Puzzle #69. Target not found.")
